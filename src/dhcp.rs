@@ -3,7 +3,7 @@ use defmt::*;
 use embassy_net::Ipv4Address;
 
 #[repr(u8)]
-#[derive(Format)]
+#[derive(Format, Copy, Clone, PartialEq, Eq)]
 pub enum Opcode {
     BootRequest = 1,
     BootReply = 2,
@@ -21,7 +21,7 @@ impl Opcode {
 
 // https://www.rfc-editor.org/rfc/rfc1700
 #[repr(u8)]
-#[derive(Format)]
+#[derive(Format, Copy, Clone, PartialEq, Eq)]
 pub enum HardwareAddressType {
     Ethernet10Mb = 1,
     ExperimentalEthernet3Mb = 2,
@@ -78,9 +78,9 @@ impl HardwareAddressType {
 }
 
 #[repr(u16)]
-#[derive(Format)]
+#[derive(Format, Copy, Clone, PartialEq, Eq)]
 pub enum Flags {
-    Empty = 0,
+    Unicast = 0,
     Broadcast = 0b1000_0000_0000_0000,
 }
 
@@ -92,7 +92,7 @@ impl Flags {
         }
 
         if flags == 0 {
-            Some(Flags::Empty)
+            Some(Flags::Unicast)
         } else {
             Some(Flags::Broadcast)
         }
@@ -100,7 +100,7 @@ impl Flags {
 }
 
 #[repr(u8)]
-#[derive(Format)]
+#[derive(Format, Copy, Clone, PartialEq, Eq)]
 pub enum DhcpMessageKind {
     Discover = 1,
     Offer = 2,
@@ -126,7 +126,7 @@ impl DhcpMessageKind {
     }
 }
 
-#[derive(Format)]
+#[derive(Format, Clone, PartialEq, Eq)]
 pub enum DhcpOption<'a> {
     Pad,
     End,
@@ -147,7 +147,7 @@ pub enum DhcpOption<'a> {
     }
 }
 
-#[derive(Format)]
+#[derive(Format, Clone, PartialEq, Eq)]
 pub struct DhcpMessage<'a> {
     /// Message op code / message type.
     pub op: Opcode,
@@ -275,5 +275,130 @@ impl<'a> DhcpMessage<'a> {
         }
 
         Some(msg)
+    }
+
+    pub fn serialise(&self, out_buf: &mut [u8; 4096]) -> usize {
+        // fields
+        out_buf[0] = self.op as u8;
+        out_buf[1] = self.htype as u8;
+        out_buf[2] = self.hlen;
+        out_buf[3] = self.hops;
+        out_buf[4..8].copy_from_slice(&self.xid.to_ne_bytes());
+        out_buf[8..10].copy_from_slice(&self.secs.to_ne_bytes());
+        out_buf[10..12].copy_from_slice(&u16::to_ne_bytes(self.flags as u16));
+        out_buf[12..16].copy_from_slice(&self.ciaddr.0);
+        out_buf[16..20].copy_from_slice(&self.yiaddr.0);
+        out_buf[20..24].copy_from_slice(&self.siaddr.0);
+        out_buf[24..28].copy_from_slice(&self.giaddr.0);
+        out_buf[28..44].copy_from_slice(&self.chaddr);
+        out_buf[44..108].copy_from_slice(&self.sname);
+        out_buf[108..236].copy_from_slice(&self.file);
+
+        // magic cookie! yum!
+        out_buf[236..240].copy_from_slice(&[99, 130, 83, 99]);
+
+        // options
+        let mut o: usize = 240;
+        for opt in &self.options {
+            match opt {
+                DhcpOption::Pad => {
+                    out_buf[o] = 0;
+                    o += 1;
+                }
+
+                DhcpOption::End => {
+                    out_buf[o] = 255;
+                    o += 1;
+                }
+
+                DhcpOption::Hostname { name } => {
+                    out_buf[o] = 12;
+                    out_buf[o+1] = name.len().try_into().unwrap();
+                    o += 2;
+                    out_buf[o..o + name.len()].copy_from_slice(name);
+                    o += name.len();
+                }
+
+                DhcpOption::RequestedIpAddress { address } => {
+                    out_buf[o] = 50;
+                    out_buf[o+1] = 4;
+                    o += 2;
+                    out_buf[o..o+4].copy_from_slice(address.as_bytes());
+                    o += 4;
+                }
+
+                DhcpOption::IpAddressLeaseTime { lease_time } => {
+                    out_buf[o] = 51;
+                    out_buf[o+1] = 4;
+                    o += 2;
+                    out_buf[o..o+4].copy_from_slice(&lease_time.to_ne_bytes());
+                    o += 4;
+                }
+
+                DhcpOption::DhcpMessageType { kind } => {
+                    out_buf[o] = 53;
+                    out_buf[o+1] = 1;
+                    out_buf[o+2] = *kind as u8;
+                    o += 3;
+                }
+
+                DhcpOption::ServerIdentifier { id } => {
+                    out_buf[o] = 54;
+                    out_buf[o+1] = 4;
+                    o += 2;
+                    out_buf[o..o+4].copy_from_slice(id.as_bytes());
+                    o += 4;
+                }
+
+                DhcpOption::ParameterRequestList { requested_params } => {
+                    out_buf[o] = 55;
+                    out_buf[o+1] = requested_params.len().try_into().unwrap();
+                    o += 2;
+                    out_buf[o..o + requested_params.len()].copy_from_slice(requested_params);
+                    o += requested_params.len();
+                }
+
+                DhcpOption::Message { text } => {
+                    out_buf[o] = 56;
+                    out_buf[o+1] = text.len().try_into().unwrap();
+                    o += 2;
+                    out_buf[o..o + text.len()].copy_from_slice(text);
+                    o += text.len();
+                }
+
+                DhcpOption::MaximumDhcpMessageSize { size } => {
+                    out_buf[o] = 57;
+                    out_buf[o+1] = 2;
+                    o += 2;
+                    out_buf[o..o+2].copy_from_slice(&size.to_ne_bytes());
+                    o += 2;
+                }
+
+                DhcpOption::RenewalTimeValue { time } => {
+                    out_buf[o] = 58;
+                    out_buf[o+1] = 4;
+                    o += 2;
+                    out_buf[o..o+4].copy_from_slice(&time.to_ne_bytes());
+                    o += 4;
+                }
+
+                DhcpOption::RebindingTimeValue { time } => {
+                    out_buf[o] = 59;
+                    out_buf[o+1] = 4;
+                    o += 2;
+                    out_buf[o..o+4].copy_from_slice(&time.to_ne_bytes());
+                    o += 4;
+                }
+
+                DhcpOption::Unsupported { code, len, data } => {
+                    out_buf[o] = *code;
+                    out_buf[o + 1] = *len;
+                    o += 2;
+                    out_buf[o..o + *len as usize].copy_from_slice(data);
+                }
+            }
+        }
+
+        o
     }
 }

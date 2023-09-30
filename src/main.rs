@@ -32,7 +32,8 @@ type Device = Ethernet<'static, ETH, GenericSMI>;
 
 const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
-const LOCAL_IP: Ipv4Address = Ipv4Address::new(10, 8, 3, 1);
+const SERVER_IP: Ipv4Address = Ipv4Address::new(10, 8, 3, 1);
+const ASSIGNED_CLIENT_IP: Ipv4Address = Ipv4Address::new(10, 8, 3, 2);
 
 #[embassy_executor::task]
 async fn net_task(stack: &'static Stack<Device>) -> ! {
@@ -93,7 +94,7 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     let config = embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4 {
-        address: Ipv4Cidr::new(LOCAL_IP, 24),
+        address: Ipv4Cidr::new(SERVER_IP, 24),
         dns_servers: Vec::new(),
         gateway: None,
     });
@@ -132,13 +133,14 @@ async fn main(spawner: Spawner) -> ! {
     udp_sock.bind(DHCP_SERVER_PORT).unwrap();
     info!("Udp socket bound!");
     loop {
-        let (n, _ep) = udp_sock.recv_from(&mut buf).await.unwrap();
+        let (n, ep) = udp_sock.recv_from(&mut buf).await.unwrap();
 
         let Some(msg) = DhcpMessage::from_bytes(&buf[..n]) else {
             continue
         };
         debug!("Parsed DHCP message: {:?}", msg);
-        for opt in msg.options {
+
+        for opt in &msg.options {
             let DhcpOption::Hostname { name } = opt else {
                 continue
             };
@@ -147,10 +149,52 @@ async fn main(spawner: Spawner) -> ! {
                 warn!("hostname contained invalid ASCII data.");
                 continue;
             };
-            info!("Got hostname={=str}", hostname);
-        }
-        // parse message as DHCP
 
+            info!("Got hostname: {=str}", hostname);
+        }
+
+        for opt in &msg.options {
+            let DhcpOption::DhcpMessageType { kind } = opt else {
+                continue
+            };
+
+            info!("DHCP message kind: {}", kind);
+        }
+
+        let transaction_id = msg.xid;
+        let client_hardware_address = msg.chaddr;
+        let client_hardware_address_len = msg.hlen;
+
+        drop(msg);
+
+        // respond with DHCPOFFER
+        let reply = DhcpMessage {
+            op: dhcp::Opcode::BootReply,
+            htype: dhcp::HardwareAddressType::Ethernet10Mb,
+            hlen: client_hardware_address_len,
+            hops: 0,
+            xid: transaction_id,
+            secs: 0,
+            flags: dhcp::Flags::Unicast,
+            ciaddr: Ipv4Address::UNSPECIFIED,
+            yiaddr: ASSIGNED_CLIENT_IP,
+            siaddr: SERVER_IP,
+            giaddr: Ipv4Address::UNSPECIFIED,
+            chaddr: client_hardware_address,
+            sname: [0u8; 64],
+            file: [0u8; 128],
+            options: Vec::from_slice(&[
+                DhcpOption::DhcpMessageType { kind: dhcp::DhcpMessageKind::Offer },
+                DhcpOption::ServerIdentifier { id: SERVER_IP },
+                DhcpOption::End
+            ]).unwrap(),
+        };
+        debug!("Sending response: {}", reply);
+
+        let reply_ser_len = reply.serialise(&mut buf);
+        info!("Serialised response into {} bytes: {:02x}", reply_ser_len, &buf[..reply_ser_len]);
+
+        udp_sock.send_to(&buf[..reply_ser_len], ep).await.unwrap();
         // let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 8, 3, 2), 80));
 
         // info!("connecting...");
