@@ -6,7 +6,7 @@ use defmt::*;
 use embassy_executor::Spawner;
 use embassy_net::tcp::client::{TcpClient, TcpClientState};
 use embassy_net::udp::{UdpSocket, PacketMetadata};
-use embassy_net::{Stack, StackResources, Ipv4Address, Ipv4Cidr};
+use embassy_net::{Stack, StackResources, Ipv4Address, Ipv4Cidr, IpEndpoint, IpAddress};
 use embassy_stm32::eth::generic_smi::GenericSMI;
 use embassy_stm32::eth::{Ethernet, PacketQueue};
 use embassy_stm32::peripherals::ETH;
@@ -34,6 +34,10 @@ const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
 const SERVER_IP: Ipv4Address = Ipv4Address::new(10, 8, 3, 1);
 const ASSIGNED_CLIENT_IP: Ipv4Address = Ipv4Address::new(10, 8, 3, 2);
+const DHCP_REMOTE_ENDPOINT: IpEndpoint = IpEndpoint { 
+    addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+    port: DHCP_CLIENT_PORT,
+};
 
 #[embassy_executor::task]
 async fn net_task(stack: &'static Stack<Device>) -> ! {
@@ -194,7 +198,8 @@ async fn main(spawner: Spawner) -> ! {
         let reply_ser_len = reply.serialise(&mut buf);
         info!("Serialised response into {} bytes: {:02x}", reply_ser_len, &buf[..reply_ser_len]);
 
-        udp_sock.send_to(&buf[..reply_ser_len], ep).await.unwrap();
+        info!("Sending DHCPOFFER message to {}", DHCP_REMOTE_ENDPOINT);
+        udp_sock.send_to(&buf[..reply_ser_len], DHCP_REMOTE_ENDPOINT).await.unwrap();
         // let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 8, 3, 2), 80));
 
         // info!("connecting...");
